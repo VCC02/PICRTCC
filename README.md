@@ -29,7 +29,7 @@ Initially uploaded to LibStock: https://libstock.mikroe.com/projects/view/16/rtc
 ---
 
 
-#RTCCP24EP library
+# RTCCP24EP library
 
 Library for accessing the PIC24EP internal RTCC. The library should be compatible with other PIC24EPs with same RTCC.
 ## Status:
