@@ -1,0 +1,1008 @@
+{
+    Copyright (C) 2026 VCC
+    creation date: 2011
+    initial release date: 12 August 2011
+
+    author: VCC
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+    The above copyright notice and this permission notice shall be included
+    in all copies or substantial portions of the Software.
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+    EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+    IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+    DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+    TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE
+    OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+}
+
+{$DEFINE IsMCU}
+unit RTCC_18FxxJ50;
+
+{         RTCC library for PIC18FxxJ50 and other PICs with compatible RTCC
+ - initially compiled/tested with mikroPascal PRO for PIC v5.0.1 -
+ - tested on PIC18F46J50 -
+}
+
+{
+
+Features:
+ - Designed for use with DeepSleep.
+ - Backup library configuration state to DeepSleep persistent registers
+ - Get/Set RTCC/Alarm
+ - Get RTCC/Alarm/ElapsedTimeToAlarm as string
+ - BCD and Dec versions of Get / Set routines for RTCC/Alarm/ElapsedTimeToAlarm
+ - Compiler directive for synchronizing RTCC/Alarm register reads with RTCSYNC bit
+ - Compiler directive for synchronizing RTCC/Alarm register writes with RTCSYNC bit
+ - Compiler directive for updating RTCC DateTime registers in Read-Modify-Write fashion
+ - Compiler directive for double sampling RTCC DateTime registers on reading
+ 
+Requirements if using DeepSleep:
+ - RTCCConfiguredAfterPowerUp variable must be reset to 0 on PIC init.
+ - RTCCConfiguredAfterPowerUp variable can be saved to DeepSleep persistent registers to preserve the information about RTCC "configured state"
+
+Limitations: 
+ - GetRTCCElapsedToNextAlarm routines do not take into account the alarm mask
+}
+ 
+ 
+{Use UseRTCSYNCReads flag to synchronize reads with RTCC timebase. This method requires waiting for RTCC synchronization bit.}
+{.$DEFINE UseRTCSYNCReads}
+
+{UseRTCSYNCWrites flag to synchronize writes with RTCC timebase. This method requires waiting for RTCC synchronization bit.}
+{$DEFINE UseRTCSYNCWrites}
+
+{When UseReadModifyWriteDateTime flag is defined, calls to SetRTCCTimeBCD, SetRTCCDateBCD, SetRTCCTimeDec, SetRTCCDateDec read both date and time,
+ then update the date or time according to the called procedure (for date or time).
+ If not defined, the updates are made only to the desired values (date or time).
+ This flag supersedes disabling interrupts on reads because they are tested and disabled (if needed) from SetRTCC procedures mentioned above.}
+{.$DEFINE UseReadModifyWriteDateTime}
+
+{The SampleTwiceOnDateTimeReading flag gives you the option to allow sampling the DateTime data twice when using the RTCSYNC synchronization.}
+{$DEFINE SampleTwiceOnDateTimeReading}
+
+
+{Include this compiler directive only if the microcontroller has deep sleep general purpose persistent registers.}
+{$DEFINE HasDeepSleep}
+
+
+{control routines}
+procedure EnableRTCCModule(Options: Byte);
+procedure DisableRTCCModule;
+procedure SetRTCCCalibrationValue(Calib: Short);
+procedure EnableRTCCAlarm(Options: Byte);
+procedure DisableRTCCAlarm;
+procedure SetRTCCAlarmRepeat(NumberOfTimes: Byte);
+
+{BCD routines}
+procedure GetRTCCDateTimeBCD(var Year, Month, Date, WeekDay, Hours, Minutes, Seconds: Byte);
+procedure SetRTCCDateTimeBCD(Year, Month, Date, WeekDay, Hours, Minutes, Seconds: Byte);
+procedure GetRTCCTimeBCD(var WeekDay, Hours, Minutes, Seconds: Byte);
+procedure SetRTCCTimeBCD(WeekDay, Hours, Minutes, Seconds: Byte);
+procedure GetRTCCDateBCD(var Year, Month, Date: Byte);
+procedure SetRTCCDateBCD(Year, Month, Date: Byte);
+procedure GetRTCCAlarmBCD(var Mask, Month, Date, WeekDay, Hours, Minutes, Seconds: Byte);
+procedure SetRTCCAlarmBCD(Mask, Month, Date, WeekDay, Hours, Minutes, Seconds: Byte);
+procedure GetRTCCElapsedToNextAlarmBCD(var Days: Word; var Hours, Minutes, Seconds: Byte);
+
+{Dec routines}
+procedure GetRTCCDateTimeDec(var Year, Month, Date, WeekDay, Hours, Minutes, Seconds: Byte);
+procedure SetRTCCDateTimeDec(Year, Month, Date, WeekDay, Hours, Minutes, Seconds: Byte);
+procedure GetRTCCTimeDec(var WeekDay, Hours, Minutes, Seconds: Byte);
+procedure SetRTCCTimeDec(WeekDay, Hours, Minutes, Seconds: Byte);
+procedure GetRTCCDateDec(var Year, Month, Date: Byte);
+procedure SetRTCCDateDec(Year, Month, Date: Byte);
+procedure GetRTCCAlarmDec(var Mask, Month, Date, WeekDay, Hours, Minutes, Seconds: Byte);
+procedure SetRTCCAlarmDec(Mask, Month, Date, WeekDay, Hours, Minutes, Seconds: Byte);
+procedure GetRTCCElapsedToNextAlarmDec(var Days: Word; var Hours, Minutes, Seconds: Byte);
+
+{RTCC/alarm string routines}
+function GetRTCCDateTimeStr(WhatToDisplay: Byte): string[30];
+procedure SetRTCCDateStrFormat(DateStrFormat: Byte);
+
+{$IFDEF HasDeepSleep}
+{RTCC state - backup routines}
+{use this procedure before entering DeepSleep}
+procedure SaveRTCCConfigStateToDeepSleepPersistentRegs(DSGPRSel: Byte);
+
+{use this procedure after waking from DeepSleep}
+procedure RestoreRTCCConfigStateFromDeepSleepPersistentRegs(DSGPRSel: Byte);
+{$ENDIF}
+
+  
+{RTCC options used by EnableRTCCModule routine}
+const
+  CRTCC_StartT1Osc: Byte = 128;
+  CRTCC_DisableT1OscOnDisableRTCC: Byte = 64;
+  CRTCC_RTCCOutputEnable: Byte = 32;
+  CRTCC_DisIntOnWrite: Byte = 16;
+  CRTCC_DisIntOnRead: Byte = 8;
+  CRTCC_DisIntOnReadWrite: Byte = CRTCC_DisIntOnWrite or CRTCC_DisIntOnRead;
+  CRTCC_RTCCPinOutputOsc: Byte = 4;
+  CRTCC_RTCCPinOutputSeconds: Byte = 2;
+  CRTCC_RTCCPinOutputAlarm: Byte = 0;
+  
+{Alarm options used by EnableRTCCAlarm routine}
+const
+  CAlarm_EnableChime = 64;
+                                        // ||||
+  CAlarm_Mask_EveryHalfSecond: Byte   = %00000000;
+  CAlarm_Mask_EverySecond: Byte       = %00000100;
+  CAlarm_Mask_Every10Seconds: Byte    = %00001000;
+  CAlarm_Mask_EveryMinute: Byte       = %00001100;
+  CAlarm_Mask_Every10Minutes: Byte    = %00010000;
+  CAlarm_Mask_EveryHour: Byte         = %00010100;
+  CAlarm_Mask_OnceADay: Byte          = %00011000;
+  CAlarm_Mask_OnceAWeek: Byte         = %00011100;
+  CAlarm_Mask_OnceAMonth: Byte        = %00100000;
+  CAlarm_Mask_OnceAYear: Byte         = %00100100;
+  
+
+const
+  CRTCC_Sunday: Byte = 0;
+  CRTCC_Monday: Byte = 1;
+  CRTCC_Tuesday: Byte = 2;
+  CRTCC_Wednesday: Byte = 3;
+  CRTCC_Thursday: Byte = 4;
+  CRTCC_Friday: Byte = 5;
+  CRTCC_Saturday: Byte = 6;
+
+{Deep Sleep General Purpose Persistent register selector. Constants used by SaveRTCCConfigStateToDeepSleepPersistentRegs and RestoreRTCCConfigStateFromDeepSleepPersistentRegs}
+const
+  CDSGPRSel_R0: Byte = 0;
+  CDSGPRSel_R1: Byte = 1;
+
+
+{Possible parameters for GetRTCCDateTimeStr}
+const
+  CRTCC_GetStrRTCC: Byte = 0;
+  CRTCC_GetStrAlarm: Byte = 1;
+  CRTCC_GetStrElapsedToNextAlarm: Byte = 2;
+
+{DateTime format constants used by SetRTCCDateStrFormat routine}
+const
+  CDateFmt_YYMMDD: Byte = 0;
+  CDateFmt_YYYYMMDD: Byte = 1;
+  CDateFmt_MMDDYY: Byte = 2;
+  CDateFmt_MMDDYYYY: Byte = 3;
+  CDateFmt_DDMMYY: Byte = 4;
+  CDateFmt_DDMMYYYY: Byte = 5;
+
+  
+var
+  {Write 0 to this variable on main init only on power up, and not if woke up from DeepSleep !!!
+  This variable is set to >0 value after configuration.
+   This variable allows detection of full or partial configuration through individual bits.
+   bit_0 = 1 - set after calling EnableRTCCModule
+   bit_1 = 1 - set after calling SetRTCCTimeBCD or SetRTCCTimeDec
+   bit_2 = 1 - set after calling SetRTCCDateBCD or SetRTCCDateDec
+   bit_3 = 1 - set after calling SetRTCCAlarmBCD or SetRTCCAlarmDec
+   bit_4 = 1 - set after calling SetRTCCCalibrationValue
+   bit_5 = 1 - set after calling EnableRTCCAlarm                                           }
+  RTCCConfiguredAfterPowerUp: Byte;
+
+const
+  {set to 1 only the used bits from RTCCConfiguredAfterPowerUp
+   This constant is used to mask the bits of RTCCConfiguredAfterPowerUp when restoring from DeepSleep Persitent register.
+   The mask allows the user to assign other bits to other purposes.}
+  CRTCC_ConfiguredAfterPowerUp_Mask: Byte = %00111111;
+
+implementation
+
+var
+  TheDateStrFormat: Byte;
+  DisableT1OscOnDisableRTCC: bit;
+  DisableInterruptsWhileReading: bit;
+  DisableInterruptsWhileWriting: bit;
+  GetSet_RTCCDateTime_CalledInternally: bit;
+
+procedure EnableRTCCRegWriting;
+var
+  EnRTCC_InterruptsEnabledBackup: Byte;
+begin
+  if RTCCFG.RTCWREN = 1 then
+    Exit;
+  //EnRTCC_InterruptsEnabledBackup := INTCON.GIE;   //keep state of general interrupt enable bit   (EnRTCC_InterruptsEnabledBackup was of bit type here)
+  EnRTCC_InterruptsEnabledBackup := INTCON;
+
+  INTCON.GIE := 0; //disable interrupts
+  asm
+    MOVLB 15
+    MOVLW 85
+    MOVWF EECON2
+    MOVLW 170
+    MOVWF EECON2
+    BSF   RTCCFG, 5, 1  //enable writing to RTCC registers
+  end;
+  //INTCON.GIE := EnRTCC_InterruptsEnabledBackup; //enable interrupts if were disabled with the above code
+  EnRTCC_InterruptsEnabledBackup := EnRTCC_InterruptsEnabledBackup and %10000000;
+  INTCON := INTCON or EnRTCC_InterruptsEnabledBackup;
+end;
+
+{Detects transition from 1 to 0 of RTCSYNC signal.}
+procedure WaitForSyncBit;
+begin
+  repeat
+  until RTCCFG.RTCSYNC = 1;
+  repeat
+  until RTCCFG.RTCSYNC = 0;
+end;
+
+{Enables RTCC}
+procedure EnableRTCCModule(Options: Byte);
+begin
+  if Options.7 = 1 then
+  begin
+    T1CON.T1OSCEN := 1; //start T1 oscillator
+    Delay_ms(50); //wait for T1 osc startup
+    DisableT1OscOnDisableRTCC := Options.6;
+  end
+  else
+    DisableT1OscOnDisableRTCC := 0;
+  
+  EnableRTCCRegWriting;
+  
+  RTCCFG.RTCOE := Options.5;  //RTCC Output Enable bit   (leave this to user action)
+  PADCFG1.RTSECSEL1 := Options.2;
+  PADCFG1.RTSECSEL0 := Options.1;
+
+  DisableInterruptsWhileReading := Options.3;
+  DisableInterruptsWhileWriting := Options.4;
+  
+  RTCCFG.RTCEN := 1;          //enable RTCC
+  RTCCFG.RTCWREN := 0;
+
+  GetSet_RTCCDateTime_CalledInternally := 0;
+  RTCCConfiguredAfterPowerUp.0 := 1;
+end;
+
+procedure DisableRTCCModule;
+begin
+  EnableRTCCRegWriting;
+  RTCCFG.RTCEN := 0;          //disable RTCC
+  RTCCFG.RTCWREN := 0;
+  
+  if DisableT1OscOnDisableRTCC = 1 then
+    T1CON.T1OSCEN := 0;  //stop T1 oscillator
+end;
+
+
+procedure EnableRTCCAlarm(Options: Byte);
+begin
+  ALRMCFG := Options or 128;
+  RTCCConfiguredAfterPowerUp.5 := 1;
+end;
+
+procedure DisableRTCCAlarm;
+begin
+  ALRMCFG.ALRMEN := 0;
+end;
+
+procedure SetRTCCAlarmRepeat(NumberOfTimes: Byte);
+var
+  AlarmEnabledBackup: bit;
+begin
+  {$IFDEF UseRTCSYNCWrites}
+    WaitForSyncBit;
+    //Now, this is a start of the access time window (transition from 1 to 0 of RTCSYNC signal).
+    //The following code should execute while RTCSYNC = 0
+  {$ENDIF}
+  AlarmEnabledBackup := ALRMCFG.ALRMEN; //backup alarm enabled state
+  ALRMCFG.ALRMEN := 0;                  //disable alarm while writing to RTCC registers
+  ALRMRPT := NumberOfTimes;
+  ALRMCFG.ALRMEN := AlarmEnabledBackup;
+end;
+
+
+
+procedure GetRTCCDateTimeBCD(var Year, Month, Date, WeekDay, Hours, Minutes, Seconds: Byte);
+var
+  OldYearRead, OldMonthRead, OldDateRead, OldWeekDayRead, OldHoursRead, OldMinutesRead, OldSecondsRead: Byte;
+  {$IFDEF SampleTwiceOnDateTimeReading}
+    ReadingMatch: Boolean;
+  {$ENDIF}
+  InterruptsEnabledBackup: bit;
+begin
+  EnableRTCCRegWriting;
+  {$IFDEF UseRTCSYNCReads}
+    WaitForSyncBit;
+    //Now, this is a start of the access time window (transition from 1 to 0 of RTCSYNC signal).
+    //The following code should execute while RTCSYNC = 0
+  {$ENDIF}
+  
+  {$IFNDEF UseReadModifyWriteDateTime}
+    if DisableInterruptsWhileReading then
+    begin
+      InterruptsEnabledBackup := INTCON.GIE;   //keep state of general interrupt enable bit
+      INTCON.GIE := 0; //disable interrupts
+    end;
+  {$ELSE}
+    if GetSet_RTCCDateTime_CalledInternally = 0 then  //called by the user, not by RTCC library
+      if DisableInterruptsWhileReading then
+      begin
+        InterruptsEnabledBackup := INTCON.GIE;   //keep state of general interrupt enable bit
+        INTCON.GIE := 0; //disable interrupts
+      end;
+  {$ENDIF}
+  
+  {$IFDEF SampleTwiceOnDateTimeReading}
+    repeat
+      ReadingMatch := True;
+
+      {get first samples}
+      RTCCFG.RTCPTR1 := 1;      //point to Year
+      RTCCFG.RTCPTR0 := 1;      //point to Year
+      OldYearRead := RTCVALL;
+
+      RTCCFG.RTCPTR1 := 1;      //point to MONTH:DATE
+      RTCCFG.RTCPTR0 := 0;      //point to MONTH:DATE
+      OldDateRead := RTCVALL;
+      OldMonthRead := RTCVALH;
+                                //point to WEEKDAY:HOUR
+      OldHoursRead := RTCVALL;
+      OldWeekDayRead := RTCVALH;
+                                //point to MINUTE:SECOND
+      OldSecondsRead := RTCVALL;
+      OldMinutesRead := RTCVALH;
+
+      {get last samples}
+      RTCCFG.RTCPTR1 := 1;      //point to Year
+      RTCCFG.RTCPTR0 := 1;      //point to Year
+      Year := RTCVALL;
+
+      RTCCFG.RTCPTR1 := 1;      //point to MONTH:DATE
+      RTCCFG.RTCPTR0 := 0;      //point to MONTH:DATE
+      Date := RTCVALL;
+      Month := RTCVALH;
+                                //point to WEEKDAY:HOUR
+      Hours := RTCVALL;
+      WeekDay := RTCVALH;
+                                //point to MINUTE:SECOND
+      Seconds := RTCVALL;
+      Minutes := RTCVALH;
+
+      ReadingMatch := ReadingMatch and (OldYearRead = Year);
+      ReadingMatch := ReadingMatch and (OldMonthRead = Month);
+      ReadingMatch := ReadingMatch and (OldDateRead = Date);
+      ReadingMatch := ReadingMatch and (OldWeekDayRead = WeekDay);
+      ReadingMatch := ReadingMatch and (OldHoursRead = Hours);
+      ReadingMatch := ReadingMatch and (OldMinutesRead = Minutes);
+      ReadingMatch := ReadingMatch and (OldSecondsRead = Seconds);
+    until ReadingMatch;
+  {$ELSE}
+    RTCCFG.RTCPTR1 := 1;      //point to Year
+    RTCCFG.RTCPTR0 := 1;      //point to Year
+    Year := RTCVALL;
+
+    RTCCFG.RTCPTR1 := 1;      //point to MONTH:DATE
+    RTCCFG.RTCPTR0 := 0;      //point to MONTH:DATE
+    Date := RTCVALL;
+    Month := RTCVALH;
+                              //point to WEEKDAY:HOUR
+    Hours := RTCVALL;
+    WeekDay := RTCVALH;
+                              //point to MINUTE:SECOND
+    Seconds := RTCVALL;
+    Minutes := RTCVALH;
+  {$ENDIF}
+  
+  {$IFNDEF UseReadModifyWriteDateTime}
+    if DisableInterruptsWhileReading then
+      INTCON.GIE := InterruptsEnabledBackup; //enable interrupts if were disabled with the above code
+  {$ELSE}
+    if GetSet_RTCCDateTime_CalledInternally = 0 then  //called by the user, not by RTCC library
+      if DisableInterruptsWhileReading then
+        INTCON.GIE := InterruptsEnabledBackup; //enable interrupts if were disabled with the above code
+  {$ENDIF}
+
+  RTCCFG.RTCWREN := 0; //disable writing to RTCPTR
+end;
+
+procedure SetRTCCDateTimeBCD(Year, Month, Date, WeekDay, Hours, Minutes, Seconds: Byte);
+var
+  InterruptsEnabledBackup: bit;
+  AlarmEnabledBackup: bit;
+begin
+  EnableRTCCRegWriting;
+  {$IFDEF UseRTCSYNCWrites}
+    WaitForSyncBit;
+    //Now, this is a start of the access time window (transition from 1 to 0 of RTCSYNC signal).
+    //The following code should execute while RTCSYNC = 0
+  {$ENDIF}
+  
+  {$IFNDEF UseReadModifyWriteDateTime}
+    if DisableInterruptsWhileWriting then
+    begin
+      InterruptsEnabledBackup := INTCON.GIE;   //keep state of general interrupt enable bit
+      INTCON.GIE := 0; //disable interrupts
+    end;
+  {$ELSE}
+    if GetSet_RTCCDateTime_CalledInternally = 0 then  //called by the user, not by RTCC library
+      if DisableInterruptsWhileWriting then
+      begin
+        InterruptsEnabledBackup := INTCON.GIE;   //keep state of general interrupt enable bit
+        INTCON.GIE := 0; //disable interrupts
+      end;
+  {$ENDIF}
+  
+  AlarmEnabledBackup := ALRMCFG.ALRMEN; //backup alarm enabled state
+  ALRMCFG.ALRMEN := 0;                  //disable alarm while writing to RTCC registers
+  
+  RTCCFG.RTCPTR1 := 1;      //point to Year
+  RTCCFG.RTCPTR0 := 1;      //point to Year
+  RTCVALL := Year;
+  
+  RTCCFG.RTCPTR1 := 1;      //point to MONTH:DATE
+  RTCCFG.RTCPTR0 := 0;      //point to MONTH:DATE
+  RTCVALL := Date;
+  RTCVALH := Month;
+                            //point to WEEKDAY:HOUR
+  RTCVALL := Hours;
+  RTCVALH := WeekDay;
+                            //point to MINUTE:SECOND
+  RTCVALL := Seconds;
+  RTCVALH := Minutes;
+  
+  ALRMCFG.ALRMEN := AlarmEnabledBackup;
+  
+  {$IFNDEF UseReadModifyWriteDateTime}
+    if DisableInterruptsWhileWriting then
+      INTCON.GIE := InterruptsEnabledBackup; //enable interrupts if were disabled with the above code
+  {$ELSE}
+    if GetSet_RTCCDateTime_CalledInternally = 0 then  //called by the user, not by RTCC library
+      if DisableInterruptsWhileWriting then
+        INTCON.GIE := InterruptsEnabledBackup; //enable interrupts if were disabled with the above code
+  {$ENDIF}
+
+  RTCCConfiguredAfterPowerUp := RTCCConfiguredAfterPowerUp or 6; //set for RTCC and alarm
+  RTCCFG.RTCWREN := 0; //disable writing to RTCPTR
+end;
+
+procedure GetRTCCTimeBCD(var WeekDay, Hours, Minutes, Seconds: Byte);
+var
+  Year, Month, Date: Byte; //Dummy vars
+begin
+  GetRTCCDateTimeBCD(Year, Month, Date, WeekDay, Hours, Minutes, Seconds);
+end;
+
+procedure SetRTCCTimeBCD(WeekDay, Hours, Minutes, Seconds: Byte);
+var
+  {$IFDEF UseReadModifyWriteDateTime}
+  YearDummy, MonthDummy, DateDummy, WeekDayDummy, HoursDummy, MinutesDummy, SecondsDummy: Byte;
+  {$ENDIF}
+  InterruptsEnabledBackup: bit;
+  AlarmEnabledBackup: bit;
+begin
+  EnableRTCCRegWriting;
+  {$IFDEF UseReadModifyWriteDateTime}
+    if DisableInterruptsWhileReading or DisableInterruptsWhileWriting then
+    begin
+      InterruptsEnabledBackup := INTCON.GIE;   //keep state of general interrupt enable bit
+      INTCON.GIE := 0; //disable interrupts
+    end;
+    
+    GetSet_RTCCDateTime_CalledInternally := 1;
+    GetRTCCDateTimeBCD(YearDummy, MonthDummy, DateDummy, WeekDayDummy, HoursDummy, MinutesDummy, SecondsDummy);
+    SetRTCCDateTimeBCD(YearDummy, MonthDummy, DateDummy,      WeekDay,      Hours,      Minutes,      Seconds);
+    GetSet_RTCCDateTime_CalledInternally := 0;
+
+    if DisableInterruptsWhileReading or DisableInterruptsWhileWriting then
+      INTCON.GIE := InterruptsEnabledBackup; //enable interrupts if were disabled with the above code
+  {$ELSE}
+    {$IFDEF UseRTCSYNCWrites}
+      WaitForSyncBit;
+      //Now, this is a start of the access time window (transition from 1 to 0 of RTCSYNC signal).
+      //The following code should execute while RTCSYNC = 0
+    {$ENDIF}
+
+    if DisableInterruptsWhileWriting then
+    begin
+      InterruptsEnabledBackup := INTCON.GIE;   //keep state of general interrupt enable bit
+      INTCON.GIE := 0; //disable interrupts
+    end;
+    
+    AlarmEnabledBackup := ALRMCFG.ALRMEN; //backup alarm enabled state
+    ALRMCFG.ALRMEN := 0;                  //disable alarm while writing to RTCC registers
+
+    RTCCFG.RTCPTR1 := 0;      //point to WEEKDAY:HOUR
+    RTCCFG.RTCPTR0 := 1;      //point to WEEKDAY:HOUR
+    
+    RTCVALL := Hours;
+    RTCVALH := WeekDay;
+                              //point to MINUTE:SECOND
+    RTCVALL := Seconds;
+    RTCVALH := Minutes;
+    
+    ALRMCFG.ALRMEN := AlarmEnabledBackup;
+
+    if DisableInterruptsWhileWriting then
+      INTCON.GIE := InterruptsEnabledBackup; //enable interrupts if were disabled with the above code
+
+  {$ENDIF}
+  RTCCFG.RTCWREN := 0; //disable writing to RTCPTR
+  
+  RTCCConfiguredAfterPowerUp.1 := 1;
+end;
+
+procedure GetRTCCDateBCD(var Year, Month, Date: Byte);
+var
+  WeekDay, Hours, Minutes, Seconds: Byte; //Dummy vars
+begin
+  GetRTCCDateTimeBCD(Year, Month, Date, WeekDay, Hours, Minutes, Seconds);
+end;
+
+procedure SetRTCCDateBCD(Year, Month, Date: Byte);
+var
+  {$IFDEF UseReadModifyWriteDateTime}
+  YearDummy, MonthDummy, DateDummy, WeekDayDummy, HoursDummy, MinutesDummy, SecondsDummy: Byte;
+  {$ENDIF}
+  InterruptsEnabledBackup: bit;
+  AlarmEnabledBackup: bit;
+begin
+  EnableRTCCRegWriting;
+  {$IFDEF UseReadModifyWriteDateTime}
+    if DisableInterruptsWhileReading or DisableInterruptsWhileWriting then
+    begin
+      InterruptsEnabledBackup := INTCON.GIE;   //keep state of general interrupt enable bit
+      INTCON.GIE := 0; //disable interrupts
+    end;
+
+    GetSet_RTCCDateTime_CalledInternally := 1;
+    GetRTCCDateTimeBCD(YearDummy, MonthDummy, DateDummy, WeekDayDummy, HoursDummy, MinutesDummy, SecondsDummy);
+    SetRTCCDateTimeBCD(     Year,      Month,      Date, WeekDayDummy, HoursDummy, MinutesDummy, SecondsDummy);
+    GetSet_RTCCDateTime_CalledInternally := 0;
+
+    if DisableInterruptsWhileReading or DisableInterruptsWhileWriting then
+      INTCON.GIE := InterruptsEnabledBackup; //enable interrupts if were disabled with the above code
+  {$ELSE}
+    {$IFDEF UseRTCSYNCWrites}
+      WaitForSyncBit;
+      //Now, this is a start of the access time window (transition from 1 to 0 of RTCSYNC signal).
+      //The following code should execute while RTCSYNC = 0
+    {$ENDIF}
+
+    if DisableInterruptsWhileWriting then
+    begin
+      InterruptsEnabledBackup := INTCON.GIE;   //keep state of general interrupt enable bit
+      INTCON.GIE := 0; //disable interrupts
+    end;
+    
+    AlarmEnabledBackup := ALRMCFG.ALRMEN; //backup alarm enabled state
+    ALRMCFG.ALRMEN := 0;                  //disable alarm while writing to RTCC registers
+
+    RTCCFG.RTCPTR1 := 1;      //point to Year
+    RTCCFG.RTCPTR0 := 1;      //point to Year
+    RTCVALL := Year;
+
+    RTCCFG.RTCPTR1 := 1;      //point to MONTH:DATE
+    RTCCFG.RTCPTR0 := 0;      //point to MONTH:DATE
+    RTCVALL := Date;
+    RTCVALH := Month;
+    
+    ALRMCFG.ALRMEN := AlarmEnabledBackup;
+
+    if DisableInterruptsWhileWriting then
+      INTCON.GIE := InterruptsEnabledBackup; //enable interrupts if were disabled with the above code
+
+  {$ENDIF}
+  RTCCFG.RTCWREN := 0; //disable writing to RTCPTR
+  
+  RTCCConfiguredAfterPowerUp.2 := 1;
+end;
+
+procedure GetRTCCAlarmBCD(var Mask, Month, Date, WeekDay, Hours, Minutes, Seconds: Byte);
+var
+  InterruptsEnabledBackup: bit;
+  AlarmEnabledBackup: bit;
+begin
+  {$IFDEF UseRTCSYNCReads}
+    WaitForSyncBit;
+    //Now, this is a start of the access time window (transition from 1 to 0 of RTCSYNC signal).
+    //The following code should execute while RTCSYNC = 0
+  {$ENDIF}
+
+  if DisableInterruptsWhileReading then
+  begin
+    InterruptsEnabledBackup := INTCON.GIE;   //keep state of general interrupt enable bit
+    INTCON.GIE := 0; //disable interrupts
+  end;
+  
+  AlarmEnabledBackup := ALRMCFG.ALRMEN; //backup alarm enabled state
+  ALRMCFG.ALRMEN := 0;                  //disable alarm while writing to alarm registers
+
+  ALRMCFG.ALRMPTR1 := 1;      //point to MONTH:DATE
+  ALRMCFG.ALRMPTR0 := 0;      //point to MONTH:DATE
+  Date := ALRMVALL;
+  Month := ALRMVALH;
+                            //point to WEEKDAY:HOUR
+  Hours := ALRMVALL;
+  WeekDay := ALRMVALH;
+                            //point to MINUTE:SECOND
+  Seconds := ALRMVALL;
+  Minutes := ALRMVALH;
+  
+  Mask := ALRMCFG and %00111100;
+  ALRMCFG.ALRMEN := AlarmEnabledBackup;
+  
+  if DisableInterruptsWhileReading then
+    INTCON.GIE := InterruptsEnabledBackup; //enable interrupts if were disabled with the above code
+end;
+
+procedure SetRTCCAlarmBCD(Mask, Month, Date, WeekDay, Hours, Minutes, Seconds: Byte);
+var
+  InterruptsEnabledBackup: bit;
+  AlarmEnabledBackup: bit;
+begin
+  {$IFDEF UseRTCSYNCWrites}
+    WaitForSyncBit;
+    //Now, this is a start of the access time window (transition from 1 to 0 of RTCSYNC signal).
+    //The following code should execute while RTCSYNC = 0
+  {$ENDIF}
+
+  if DisableInterruptsWhileWriting then
+  begin
+    InterruptsEnabledBackup := INTCON.GIE;   //keep state of general interrupt enable bit
+    INTCON.GIE := 0; //disable interrupts
+  end;
+
+  AlarmEnabledBackup := ALRMCFG.ALRMEN; //backup alarm enabled state
+  ALRMCFG.ALRMEN := 0;                  //disable alarm while writing to alarm registers
+
+  ALRMCFG.ALRMPTR1 := 1;      //point to MONTH:DATE
+  ALRMCFG.ALRMPTR0 := 0;      //point to MONTH:DATE
+  ALRMVALL := Date;
+  ALRMVALH := Month;
+                            //point to WEEKDAY:HOUR
+  ALRMVALL := Hours;
+  ALRMVALH := WeekDay;
+                            //point to MINUTE:SECOND
+  ALRMVALL := Seconds;
+  ALRMVALH := Minutes;
+  
+  Mask := Mask and %00111100; //ensure Mask variable does not contain other bits set
+  ALRMCFG := ALRMCFG and %11000011; //clear old mask
+  ALRMCFG := ALRMCFG or Mask;       //set the new mask
+
+  ALRMCFG.ALRMEN := AlarmEnabledBackup;
+
+  if DisableInterruptsWhileWriting then
+    INTCON.GIE := InterruptsEnabledBackup; //enable interrupts if were disabled with the above code
+  
+  RTCCConfiguredAfterPowerUp.3 := 1;
+end;
+
+procedure GetRTCCElapsedToNextAlarmDec(var Days: Word; var Hours, Minutes, Seconds: Byte); forward;
+
+procedure GetRTCCElapsedToNextAlarmBCD(var Days: Word; var Hours, Minutes, Seconds: Byte);
+begin
+  GetRTCCElapsedToNextAlarmDec(Days, Hours, Minutes, Seconds); //forward implemented
+  Days := Dec2Bcd16(Days);
+  Hours := Dec2Bcd(Hours);
+  Minutes := Dec2Bcd(Minutes);
+  Seconds := Dec2Bcd(Seconds);
+end;
+
+
+procedure GetRTCCDateTimeDec(var Year, Month, Date, WeekDay, Hours, Minutes, Seconds: Byte);
+begin
+  GetRTCCDateTimeBCD(Year, Month, Date, WeekDay, Hours, Minutes, Seconds);
+  Year := Bcd2Dec(Year);
+  Month := Bcd2Dec(Month);
+  Date := Bcd2Dec(Date);
+  WeekDay := Bcd2Dec(WeekDay);
+  Hours := Bcd2Dec(Hours);
+  Minutes := Bcd2Dec(Minutes);
+  Seconds := Bcd2Dec(Seconds);
+end;
+
+procedure SetRTCCDateTimeDec(Year, Month, Date, WeekDay, Hours, Minutes, Seconds: Byte);
+begin
+  Year := Dec2Bcd(Year);
+  Month := Dec2Bcd(Month);
+  Date := Dec2Bcd(Date);
+  WeekDay := Dec2Bcd(WeekDay);
+  Hours := Dec2Bcd(Hours);
+  Minutes := Dec2Bcd(Minutes);
+  Seconds := Dec2Bcd(Seconds);
+  SetRTCCDateTimeBCD(Year, Month, Date, WeekDay, Hours, Minutes, Seconds);
+end;
+
+
+procedure GetRTCCTimeDec(var WeekDay, Hours, Minutes, Seconds: Byte);
+begin
+  GetRTCCTimeBCD(WeekDay, Hours, Minutes, Seconds);
+  WeekDay := Bcd2Dec(WeekDay);
+  Hours := Bcd2Dec(Hours);
+  Minutes := Bcd2Dec(Minutes);
+  Seconds := Bcd2Dec(Seconds);
+end;
+
+procedure SetRTCCTimeDec(WeekDay, Hours, Minutes, Seconds: Byte);
+begin
+  WeekDay := Dec2Bcd(WeekDay);
+  Hours := Dec2Bcd(Hours);
+  Minutes := Dec2Bcd(Minutes);
+  Seconds := Dec2Bcd(Seconds);
+  SetRTCCTimeBCD(WeekDay, Hours, Minutes, Seconds);
+end;
+
+procedure GetRTCCDateDec(var Year, Month, Date: Byte);
+begin
+  GetRTCCDateBCD(Year, Month, Date);
+  Year := Bcd2Dec(Year);
+  Month := Bcd2Dec(Month);
+  Date := Bcd2Dec(Date);
+end;
+
+procedure SetRTCCDateDec(Year, Month, Date: Byte);
+begin
+  Year := Dec2Bcd(Year);
+  Month := Dec2Bcd(Month);
+  Date := Dec2Bcd(Date);
+  SetRTCCDateBCD(Year, Month, Date);
+end;
+
+
+procedure GetRTCCAlarmDec(var Mask, Month, Date, WeekDay, Hours, Minutes, Seconds: Byte);
+begin
+  GetRTCCAlarmBCD(Mask, Month, Date, WeekDay, Hours, Minutes, Seconds);
+  Month := Bcd2Dec(Month);
+  Date := Bcd2Dec(Date);
+  WeekDay := Bcd2Dec(WeekDay);
+  Hours := Bcd2Dec(Hours);
+  Minutes := Bcd2Dec(Minutes);
+  Seconds := Bcd2Dec(Seconds);
+end;
+
+procedure SetRTCCAlarmDec(Mask, Month, Date, WeekDay, Hours, Minutes, Seconds: Byte);
+begin
+  Month := Dec2Bcd(Month);
+  Date := Dec2Bcd(Date);
+  WeekDay := Dec2Bcd(WeekDay);
+  Hours := Dec2Bcd(Hours);
+  Minutes := Dec2Bcd(Minutes);
+  Seconds := Dec2Bcd(Seconds);
+  SetRTCCAlarmBCD(Mask, Month, Date, WeekDay, Hours, Minutes, Seconds);
+end;
+
+{computes the elapsed time to next alarm
+Limitation: does not count for alarm mask}
+procedure GetRTCCElapsedToNextAlarmDec(var Days: Word; var Hours, Minutes, Seconds: Byte);
+var
+  Year_Now, Month_Now, Date_Now, WeekDay_Now, Hours_Now, Minutes_Now, Seconds_Now: Byte;
+  Mask, Month_Alarm, Date_Alarm, WeekDay_Alarm, Hours_Alarm, Minutes_Alarm, Seconds_Alarm: Byte;
+  DateTimeDiff: Longint;
+  TsNow, TsAlarm: TimeStruct;
+begin
+  {GetDateTime: Now and Alarm}
+  GetRTCCDateTimeDec(Year_Now, Month_Now, Date_Now, WeekDay_Now, Hours_Now, Minutes_Now, Seconds_Now);
+  GetRTCCAlarmDec(Mask, Month_Alarm, Date_Alarm, WeekDay_Alarm, Hours_Alarm, Minutes_Alarm, Seconds_Alarm);
+
+  {Load TsNow structure}
+  TsNow.yy := 2000;
+  TsNow.mo := Month_Now;
+  TsNow.md := Date_Now;
+  TsNow.wd := WeekDay_Now;  // monday=0, tuesday=1, .... sunday=6 ??????????????????????????????????????
+  TsNow.hh := Hours_Now;
+  TsNow.mn := Minutes_Now;
+  TsNow.ss := Seconds_Now;
+  
+  {Load TsAlarm structure}
+  TsAlarm.yy := 2000;
+  TsAlarm.mo := Month_Alarm;
+  TsAlarm.md := Date_Alarm;
+  TsAlarm.wd := WeekDay_Alarm;  // monday=0, tuesday=1, .... sunday=6 ??????????????????????????????????????
+  TsAlarm.hh := Hours_Alarm;
+  TsAlarm.mn := Minutes_Alarm;
+  TsAlarm.ss := Seconds_Alarm;
+
+  {Compute difference}
+  DateTimeDiff := Time_dateDiff(@TsNow, @TsAlarm);
+
+  if DateTimeDiff < 0 then
+    DateTimeDiff := 0;
+    
+  Seconds := Lo(LongInt(DateTimeDiff mod 60));
+  Minutes := Lo(LongInt((DateTimeDiff div 60) mod 60));
+  Hours := Lo(LongInt((DateTimeDiff div 3600) mod 24));
+  Days := LongInt((DateTimeDiff div 86400));
+end;
+
+procedure SetRTCCCalibrationValue(Calib: Short);
+var
+  AlarmEnabledBackup: bit;
+  T1OscEnabledBackup: bit;
+begin
+  T1OscEnabledBackup := T1CON.T1OSCEN;  //backup T1 osc enable state
+  AlarmEnabledBackup := ALRMCFG.ALRMEN; //backup alarm enabled state
+  T1CON.T1OSCEN := 0;                   //disable T1 osc
+  ALRMCFG.ALRMEN := 0;                  //disable alarm while writing to RTCC registers
+  RTCCAL := Calib;                      //set calibration register
+  ALRMCFG.ALRMEN := AlarmEnabledBackup; //enable alarm if was desabled by above code
+
+  if T1OscEnabledBackup = 1 then
+  begin
+    T1CON.T1OSCEN := 1;//start T1 oscillator
+    Delay_ms(50); //wait for T1 osc startup
+  end;
+  
+  RTCCConfiguredAfterPowerUp.4 := 1;
+end;
+
+function WordToStrClone(Value: Word): string[4];  //for 4 digits  - change this to string[5] if you want 5 digits
+var
+  LastDigit: Byte;
+  n: Byte;
+begin
+  Result := '';
+  n := 0;
+  repeat
+    Inc(n);
+    LastDigit := Value mod 10;
+    Value := Value div 10;
+    Result := Chr(LastDigit + 48) + Result;
+  until Value = 0;
+  Result[n] := #0;
+end;
+
+procedure ByteToStr_TwoDigits(AByte: Byte; var AByteStr: string[2]);   //[2] -  AByte is not greater 59
+var
+  AByteBackup: Byte;
+begin
+  AByteBackup := AByte;
+  AByteStr := WordToStrClone(AByte);
+  
+  if AByteBackup <= 9 then
+    AByteStr := '0' + AByteStr;
+end;
+
+{Returns RTCC Time, alarm time or alarm elapsed time.}
+function GetRTCCDateTimeStr(WhatToDisplay: Byte): string[30];
+// example: Friday, 2011.08.05 19:58:30
+var 
+  Year, Month, Date, WeekDay, Hours, Minutes, Seconds: Byte;
+  Days: Word;
+  sYear: string[4];
+  sWeekDay: string[9];
+  sMonth, sDate, sHours, sMinutes, sSeconds: string[2];
+  sDays: string[3];
+begin
+  case WhatToDisplay of
+    CRTCC_GetStrRTCC: //
+      GetRTCCDateTimeDec(Year, Month, Date, WeekDay, Hours, Minutes, Seconds);
+    
+    CRTCC_GetStrAlarm: //
+    begin
+      GetRTCCAlarmDec(Year, Month, Date, WeekDay, Hours, Minutes, Seconds);
+      Year := 0;
+    end;
+    
+    CRTCC_GetStrElapsedToNextAlarm: //
+    begin
+      Year := 0;
+      Month := 0;
+      WeekDay := 8; //undefined for this purpose
+      GetRTCCElapsedToNextAlarmDec(Days, Hours, Minutes, Seconds);
+    end;
+  end;
+  
+  {converting to string}
+  
+  if WhatToDisplay = CRTCC_GetStrElapsedToNextAlarm then
+  begin
+    sDays := WordToStrClone(Days);
+    sHours := WordToStrClone(Hours);
+    sMinutes := WordToStrClone(Minutes);
+    sSeconds := WordToStrClone(Seconds);
+
+    Result := sDays;
+    Result := Result + 'd ';
+    Result := Result + sHours;
+    Result := Result + 'h ';
+    Result := Result + sMinutes;
+    Result := Result + 'm ';
+    Result := Result + sSeconds;
+    Result := Result + 's';
+  end
+  else
+  begin
+    if TheDateStrFormat.0 = 1 then   //YYYY format
+    begin
+      if WhatToDisplay = CRTCC_GetStrRTCC then
+        sYear := WordToStrClone(Year + 2000)
+      else
+        SYear := '0';
+    end
+    else                             //YY format
+      sYear := WordToStrClone(Year);
+  
+    ByteToStr_TwoDigits(Month, sMonth);
+    ByteToStr_TwoDigits(Date, sDate);
+    ByteToStr_TwoDigits(Hours, sHours);
+    ByteToStr_TwoDigits(Minutes, sMinutes);
+    ByteToStr_TwoDigits(Seconds, sSeconds);
+
+    case WeekDay of
+      CRTCC_Sunday: sWeekDay := 'Sunday';
+      CRTCC_Monday: sWeekDay := 'Monday';
+      CRTCC_Tuesday: sWeekDay := 'Tuesday';
+      CRTCC_Wednesday: sWeekDay := 'Wednesday';
+      CRTCC_Thursday: sWeekDay := 'Thursday';
+      CRTCC_Friday: sWeekDay := 'Friday';
+      CRTCC_Saturday: sWeekDay := 'Saturday'
+    else
+      sWeekDay := 'Unknown';
+    end;
+
+    {formatting result}
+    Result := sWeekDay;
+    Result := Result + ', ';
+
+    case TheDateStrFormat of
+      CDateFmt_YYMMDD, CDateFmt_YYYYMMDD:  //
+      begin
+        Result := Result + sYear;
+        Result := Result + '.';
+        Result := Result + sMonth;
+        Result := Result + '.';
+        Result := Result + sDate;
+      end;
+
+      CDateFmt_MMDDYY, CDateFmt_MMDDYYYY:  //
+      begin
+        Result := Result + sMonth;
+        Result := Result + '.';
+        Result := Result + sDate;
+        Result := Result + '.';
+        Result := Result + sYear;
+      end;
+
+      CDateFmt_DDMMYY, CDateFmt_DDMMYYYY:  //
+      begin
+        Result := Result + sDate;
+        Result := Result + '.';
+        Result := Result + sMonth;
+        Result := Result + '.';
+        Result := Result + sYear;
+      end;
+    end; //case
+
+    Result := Result + ' ';
+    Result := Result + sHours;
+    Result := Result + ':';
+    Result := Result + sMinutes;
+    Result := Result + ':';
+    Result := Result + sSeconds;
+  end;
+end;
+
+procedure SetRTCCDateStrFormat(DateStrFormat: Byte);
+begin
+  TheDateStrFormat := DateStrFormat;
+end;
+
+{$IFDEF HasDeepSleep}
+procedure SaveRTCCConfigStateToDeepSleepPersistentRegs(DSGPRSel: Byte);
+begin
+  if DSGPRSel = 0 then
+    DSGPR0 := RTCCConfiguredAfterPowerUp
+  else
+    DSGPR1 := RTCCConfiguredAfterPowerUp;
+end;
+
+procedure RestoreRTCCConfigStateFromDeepSleepPersistentRegs(DSGPRSel: Byte);
+begin
+  if DSGPRSel = 0 then
+    RTCCConfiguredAfterPowerUp := DSGPR0 and CRTCC_ConfiguredAfterPowerUp_Mask
+  else
+    RTCCConfiguredAfterPowerUp := DSGPR1 and CRTCC_ConfiguredAfterPowerUp_Mask;
+end;
+{$ENDIF}
+
+
+end.
